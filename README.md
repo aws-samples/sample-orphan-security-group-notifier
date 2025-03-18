@@ -55,7 +55,6 @@ Here are the steps to deploy the Solution using the provided CloudFormation temp
 
 - Clone the repository Clone this repository to your local machine using the following command: `git clone https://github.com/aws-samples/sample-orphan-security-group-notifier.git`
 
-
 - Navigate to the repository directory `cd sample-orphan-security-group-notifier`
 
 - Create an AWS CloudFormation stack Open the AWS CloudFormation console and click on "Create stack" -> "With new resources (standard)"..
