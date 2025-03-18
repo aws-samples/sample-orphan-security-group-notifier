@@ -1,0 +1,199 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Creates a Lambda Function along with Event Scheduler"
+Parameters:
+  snsTopicArn:
+    Description: SNS Topic Arn for Unused SG notifications
+    Type: String
+  ScheduleExpr:
+    Type: String
+    Description: Enter the schedule for lambda, use rate expressions.
+      The default value triggers this every 12 hours. For more information https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html#RateExpressions
+    Default: rate(12 hour)
+###################################################################
+Resources:       
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: "/"
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - ec2:DescribeSecurityGroups
+            - ec2:DescribeNetworkInterfaces
+            - ec2:DescribeInstances
+            Effect: Allow
+            Resource: "*"
+          - Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource: 
+              Fn::Sub: arn:aws:logs:${AWS::Region}:*:log-group:/aws/lambda/${AWS::StackName}-${AWS::AccountId}-${AWS::Region}:*
+          - Action:
+            - logs:CreateLogGroup
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:aws:logs:${AWS::Region}:*
+          - Action:
+            - sns:Publish
+            Effect: Allow
+            Resource:
+              Ref: snsTopicArn
+          Version: '2012-10-17'
+        PolicyName:
+          Fn::Sub: AWS-USG-${AWS::StackName}-${AWS::Region}
+      RoleName:
+        Fn::Sub: AWS-USG-${AWS::StackName}-${AWS::Region}
+
+  EventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - scheduler.amazonaws.com
+        Version: '2012-10-17'
+      Path: "/"
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - lambda:InvokeFunction
+            Effect: Allow
+            Resource:
+            - Fn::GetAtt: LambdaFunction.Arn
+          Version: '2012-10-17'
+        PolicyName:
+          Fn::Sub: AWS-USG-Event-${AWS::StackName}-${AWS::Region}
+      RoleName:
+        Fn::Sub: AWS-USG-Event-${AWS::StackName}-${AWS::Region}
+
+###################################################################
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Find Unused SG Lambda Function
+      FunctionName: 
+        Fn::Sub: ${AWS::StackName}-${AWS::AccountId}-${AWS::Region}
+      Handler: index.lambda_handler
+      Environment:
+        Variables:
+          SNS_topic_ARN: 
+            Ref: snsTopicArn
+      Role: 
+        Fn::GetAtt: LambdaRole.Arn
+      ReservedConcurrentExecutions: 1
+      MemorySize: 512
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+
+          # Create clients for EC2, bedrock and SNS
+          ec2 = boto3.client('ec2')
+          sns = boto3.client('sns')
+
+          # Replace with your SNS topic ARN
+          sns_topic_arn = os.environ.get('SNS_topic_ARN')
+
+          def lambda_handler(event, context):
+              # Get a list of all security groups
+              security_groups = ec2.describe_security_groups()['SecurityGroups']
+              unused_security_groups = []
+
+              # Iterate over each security group
+              for security_group in security_groups:
+                  # Check if the security group is associated with any network interfaces or instances
+                  network_interfaces = ec2.describe_network_interfaces(
+                      Filters=[
+                          {
+                              'Name': 'group-id',
+                              'Values': [security_group['GroupId']]
+                          }
+                      ]
+                  )['NetworkInterfaces']
+          
+                  instances = ec2.describe_instances(
+                      Filters=[
+                          {
+                              'Name': 'vpc-id',
+                              'Values': [security_group['VpcId']]
+                          },
+                          {
+                              'Name': 'instance.group-id',
+                              'Values': [security_group['GroupId']]
+                          }
+                      ]
+                  )['Reservations']
+
+                  # If the security group is not associated with any network interfaces or instances, mark it as unused
+                  if not network_interfaces and not instances:
+                      unused_security_groups.append({
+                          'GroupId': security_group['GroupId'],
+                          'GroupName': security_group['GroupName'],
+                          'VpcId': security_group['VpcId'],
+                          'Description': security_group['Description']
+                      })
+
+              # If there are unused security groups, send an SNS notification
+              if unused_security_groups:
+                  message = "The following security groups are unused:\n\n"
+                  for security_group in unused_security_groups:
+                      message += f"GroupId:{security_group['GroupId']}\n VpcId: {security_group['VpcId']}\n GroupName: {security_group['GroupName']}\n Description: {security_group['Description']}\n\n"
+
+                  sns.publish(
+                      TopicArn=sns_topic_arn,
+                      Message=message,
+                      Subject='Unused Security Groups Detected for Account: {}, Region: {}'.format(context.invoked_function_arn.split(':')[4], context.invoked_function_arn.split(':')[3])
+                  )
+
+              return {
+                  'statusCode': 200,
+                  'body': 'Lambda function executed successfully.'
+              }      
+      Runtime: python3.13
+      Timeout: 900
+      TracingConfig:
+        Mode: Active 
+
+###################################################################
+  ScheduledRule0:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Scheduled Rule for lambda execution
+      State: ENABLED
+      ScheduleExpression:
+        Ref: ScheduleExpr
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn:
+          Fn::GetAtt: LambdaFunction.Arn
+        RoleArn:
+          Fn::GetAtt: EventRole.Arn
+
+  PermissionForEventsToInvokeLambda0:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-${AWS::AccountId}-${AWS::Region}
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt: ScheduledRule0.Arn
