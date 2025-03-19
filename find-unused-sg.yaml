@@ -44,7 +44,7 @@ Resources:
             - logs:CreateLogGroup
             Effect: Allow
             Resource:
-              Fn::Sub: arn:aws:logs:${AWS::Region}:*
+              Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
           - Action:
             - sns:Publish
             Effect: Allow
